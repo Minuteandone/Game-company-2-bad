@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Echo Relay — agent-03 synthesis experiment</title>
+<style>
+  :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #080b12; color: #e7f7ff; padding: 12px;
+  }
+  main { width: min(100%, 980px); }
+  h1 { margin: 0 0 4px; font-size: clamp(20px, 4vw, 34px); }
+  .sub { opacity: .72; margin: 0 0 10px; line-height: 1.45; }
+  .frame { border: 1px solid #334157; border-radius: 14px; overflow: hidden; background: #05070c; box-shadow: 0 18px 60px #0008; }
+  canvas { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; touch-action: none; background: #05070c; }
+  .hudbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 9px; border-top: 1px solid #283447; background: #0d121d; }
+  .status { min-width: 220px; font-size: 13px; opacity: .9; }
+  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 42px); grid-template-rows: repeat(2, 38px); gap: 4px; }
+  button {
+    appearance: none; border: 1px solid #4d6488; border-radius: 9px; background: #172236; color: #f3fbff;
+    min-height: 38px; padding: 0 12px; font: inherit; font-weight: 700; touch-action: none; user-select: none;
+  }
+  button:active, button.active { background: #2b466a; transform: translateY(1px); }
+  .up { grid-column: 2; }
+  .left { grid-column: 1; grid-row: 2; }
+  .down { grid-column: 2; grid-row: 2; }
+  .right { grid-column: 3; grid-row: 2; }
+  .pulse { min-width: 88px; min-height: 80px; border-color: #4f9cc3; background: #102b3b; }
+  .restart { opacity: .85; }
+  .tiny { font-size: 12px; opacity: .6; margin: 8px 2px 0; line-height: 1.45; }
+  @media (max-width: 620px) {
+    body { padding: 6px; place-items: start center; }
+    .status { width: 100%; }
+    .hudbar { justify-content: center; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Echo Relay</h1>
+  <p class="sub">Synthesis experiment by <strong>agent-03 (AI agent)</strong>: reveal the room, record a route, then coordinate with your repeating past selves.</p>
+  <div class="frame">
+    <canvas id="game" width="960" height="540" aria-label="Echo Relay game area"></canvas>
+    <div class="hudbar">
+      <div class="status" id="status">Press Start or Enter.</div>
+      <div class="controls">
+        <div class="dpad" aria-label="movement controls">
+          <button class="up" data-dir="up" aria-label="move up">▲</button>
+          <button class="left" data-dir="left" aria-label="move left">◀</button>
+          <button class="down" data-dir="down" aria-label="move down">▼</button>
+          <button class="right" data-dir="right" aria-label="move right">▶</button>
+        </div>
+        <button class="pulse" id="pulseBtn">PULSE<br><small>Space</small></button>
+        <button id="startBtn">Start</button>
+        <button class="restart" id="restartBtn">Restart</button>
+      </div>
+    </div>
+  </div>
+  <p class="tiny">Goal: at the end of a loop, stand the current player and echoes on all three relay pads. Hidden walls still block movement; pulses reveal nearby geometry. Five loops maximum.</p>
+</main>
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.querySelector("#game");
+  const ctx = canvas.getContext("2d");
+  const statusEl = document.querySelector("#status");
+  const startBtn = document.querySelector("#startBtn");
+  const restartBtn = document.querySelector("#restartBtn");
+  const pulseBtn = document.querySelector("#pulseBtn");
+
+  const W = canvas.width, H = canvas.height;
+  const LOOP = 8;
+  const MAX_LOOPS = 5;
+  const SPEED = 185;
+  const R = 11;
+  const PULSE_RANGE = 285;
+  const START = { x: 475, y: 285 };
+
+  const wallsTemplate = [
+    {x:260,y:70,w:28,h:250},
+    {x:260,y:390,w:28,h:90},
+    {x:470,y:60,w:28,h:155},
+    {x:470,y:315,w:28,h:165},
+    {x:675,y:70,w:28,h:250},
+    {x:675,y:390,w:28,h:90},
+    {x:70,y:245,w:185,h:26},
+    {x:705,y:245,w:185,h:26},
+    {x:355,y:245,w:250,h:26}
+  ];
+
+  const padsTemplate = [
+    {x:125,y:115,label:"A"},
+    {x:835,y:115,label:"B"},
+    {x:835,y:435,label:"C"}
+  ];
+
+  let walls, pads, player, echoes, recording, recordedPulses, pulses;
+  let keys = new Set(), touchDirs = new Set();
+  let running = false, won = false, failed = false;
+  let loopNumber = 1, loopTime = 0, pulseCooldown = 0, lastTs = 0;
+
+  function resetGame() {
+    walls = wallsTemplate.map(w => ({...w, known:false, reveal:0}));
+    pads = padsTemplate.map(p => ({...p, known:false, reveal:0}));
+    player = {...START};
+    echoes = [];
+    recording = [{t:0,x:START.x,y:START.y}];
+    recordedPulses = [];
+    pulses = [];
+    running = false;
+    won = false;
+    failed = false;
+    loopNumber = 1;
+    loopTime = 0;
+    pulseCooldown = 0;
+    lastTs = performance.now();
+    updateStatus();
+  }
+
+  function startGame() {
+    if (won || failed) resetGame();
+    running = true;
+    startBtn.textContent = "Running";
+    emitPulse(player.x, player.y, false, true);
+    updateStatus();
+  }
+
+  function restart() {
+    resetGame();
+    startGame();
+  }
+
+  function centerRect(w) { return {x:w.x+w.w/2,y:w.y+w.h/2}; }
+  function dist(a,b) { return Math.hypot(a.x-b.x,a.y-b.y); }
+
+  function revealFrom(x, y) {
+    const origin = {x,y};
+    for (const w of walls) {
+      const c = centerRect(w);
+      if (dist(origin,c) <= PULSE_RANGE + Math.max(w.w,w.h)/2) {
+        w.known = true; w.reveal = 1.25;
+      }
+    }
+    for (const p of pads) {
+      if (dist(origin,p) <= PULSE_RANGE) {
+        p.known = true; p.reveal = 1.45;
+      }
+    }
+  }
+
+  function emitPulse(x, y, isEcho=false, free=false) {
+    if (!free && !isEcho) {
+      if (!running || pulseCooldown > 0 || won || failed) return;
+      pulseCooldown = 0.9;
+      recordedPulses.push(loopTime);
+    }
+    pulses.push({x,y,age:0,isEcho});
+    revealFrom(x,y);
+  }
+
+  function pulseNow() { emitPulse(player.x, player.y, false, false); }
+
+  function collides(x,y) {
+    for (const w of walls) {
+      const nx = Math.max(w.x, Math.min(x, w.x+w.w));
+      const ny = Math.max(w.y, Math.min(y, w.y+w.h));
+      if ((x-nx)*(x-nx) + (y-ny)*(y-ny) < R*R) return true;
+    }
+    return x < R+8 || x > W-R-8 || y < R+8 || y > H-R-8;
+  }
+
+  function movePlayer(dx,dy,dt) {
+    if (!dx && !dy) return;
+    const mag = Math.hypot(dx,dy) || 1;
+    dx = dx/mag * SPEED * dt;
+    dy = dy/mag * SPEED * dt;
+
+    const nx = player.x + dx;
+    if (!collides(nx, player.y)) player.x = nx;
+    const ny = player.y + dy;
+    if (!collides(player.x, ny)) player.y = ny;
+  }
+
+  function samplePath() {
+    const last = recording[recording.length-1];
+    if (!last || loopTime - last.t >= 0.035) recording.push({t:loopTime,x:player.x,y:player.y});
+  }
+
+  function atPath(path,t) {
+    if (!path.length) return {...START};
+    if (t <= path[0].t) return {x:path[0].x,y:path[0].y};
+    const last = path[path.length-1];
+    if (t >= last.t) return {x:last.x,y:last.y};
+
+    let lo=0, hi=path.length-1;
+    while (lo+1 < hi) {
+      const mid=(lo+hi)>>1;
+      if (path[mid].t < t) lo=mid; else hi=mid;
+    }
+    const a=path[lo], b=path[hi];
+    const span=Math.max(.0001,b.t-a.t);
+    const q=(t-a.t)/span;
+    return {x:a.x+(b.x-a.x)*q, y:a.y+(b.y-a.y)*q};
+  }
+
+  function occupancyPositions(t) {
+    return [ {x:player.x,y:player.y,current:true}, ...echoes.map((e,i)=>({...atPath(e.path,t),echo:i})) ];
+  }
+
+  function padsOccupied(t) {
+    const positions = occupancyPositions(t);
+    return pads.map(p => positions.some(pos => Math.hypot(pos.x-p.x,pos.y-p.y) <= 27));
+  }
+
+  function resolveLoop() {
+    recording.push({t:LOOP,x:player.x,y:player.y});
+    const occupied = padsOccupied(LOOP);
+
+    if (occupied.every(Boolean)) {
+      running=false; won=true;
+      updateStatus();
+      return;
+    }
+
+    if (loopNumber >= MAX_LOOPS) {
+      running=false; failed=true;
+      updateStatus();
+      return;
+    }
+
+    echoes.push({
+      path: recording.map(p=>({...p})),
+      pulses: recordedPulses.slice(),
+      pulseCursor: 0
+    });
+
+    loopNumber++;
+    loopTime=0;
+    player={...START};
+    recording=[{t:0,x:START.x,y:START.y}];
+    recordedPulses=[];
+    pulseCooldown=0;
+    for (const e of echoes) e.pulseCursor=0;
+    emitPulse(player.x,player.y,false,true);
+    updateStatus();
+  }
+
+  function update(dt) {
+    if (!running || won || failed) return;
+
+    const prev = loopTime;
+    loopTime = Math.min(LOOP, loopTime + dt);
+    pulseCooldown = Math.max(0,pulseCooldown-dt);
+
+    let dx=0,dy=0;
+    const held = k => keys.has(k);
+    if (held("ArrowLeft") || held("a") || held("A") || touchDirs.has("left")) dx--;
+    if (held("ArrowRight") || held("d") || held("D") || touchDirs.has("right")) dx++;
+    if (held("ArrowUp") || held("w") || held("W") || touchDirs.has("up")) dy--;
+    if (held("ArrowDown") || held("s") || held("S") || touchDirs.has("down")) dy++;
+    movePlayer(dx,dy,dt);
+    samplePath();
+
+    for (const e of echoes) {
+      while (e.pulseCursor < e.pulses.length && e.pulses[e.pulseCursor] <= loopTime) {
+        const pt = e.pulses[e.pulseCursor];
+        if (pt >= prev - 0.001) {
+          const pos = atPath(e.path, pt);
+          emitPulse(pos.x,pos.y,true,true);
+        }
+        e.pulseCursor++;
+      }
+    }
+
+    for (const p of pulses) p.age += dt;
+    pulses = pulses.filter(p => p.age < 1.05);
+    for (const w of walls) w.reveal = Math.max(0,w.reveal-dt);
+    for (const p of pads) p.reveal = Math.max(0,p.reveal-dt);
+
+    if (loopTime >= LOOP) resolveLoop();
+    else updateStatus();
+  }
+
+  function drawGrid() {
+    ctx.strokeStyle="#132033";
+    ctx.lineWidth=1;
+    for(let x=0;x<=W;x+=48){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+    for(let y=0;y<=H;y+=48){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+  }
+
+  function drawWalls() {
+    for (const w of walls) {
+      if (!w.known) continue;
+      const alpha = w.reveal > 0 ? .74 : .16;
+      ctx.fillStyle=`rgba(117,169,214,${alpha})`;
+      ctx.fillRect(w.x,w.y,w.w,w.h);
+      if (w.reveal > 0) {
+        ctx.strokeStyle="rgba(191,228,255,.88)";
+        ctx.strokeRect(w.x+.5,w.y+.5,w.w-1,w.h-1);
+      }
+    }
+  }
+
+  function drawPads() {
+    const occ = padsOccupied(loopTime);
+    pads.forEach((p,i) => {
+      if (!p.known && !occ[i]) return;
+      ctx.beginPath(); ctx.arc(p.x,p.y,23,0,Math.PI*2);
+      ctx.fillStyle = occ[i] ? "rgba(136,255,171,.36)" : (p.reveal>0 ? "rgba(255,220,112,.28)" : "rgba(255,220,112,.10)");
+      ctx.fill();
+      ctx.lineWidth=3;
+      ctx.strokeStyle = occ[i] ? "#8effab" : (p.reveal>0 ? "#ffdc70" : "#756b42");
+      ctx.stroke();
+      ctx.fillStyle = occ[i] ? "#caffd7" : "#ffe9a6";
+      ctx.font="bold 17px ui-monospace, monospace";
+      ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(p.label,p.x,p.y+1);
+    });
+  }
+
+  function drawEchoes() {
+    echoes.forEach((e,i) => {
+      if (e.path.length > 1) {
+        ctx.beginPath();
+        e.path.forEach((pt,j)=> j ? ctx.lineTo(pt.x,pt.y) : ctx.moveTo(pt.x,pt.y));
+        ctx.strokeStyle="rgba(191,128,255,.14)";
+        ctx.lineWidth=2; ctx.stroke();
+      }
+      const pos=atPath(e.path,loopTime);
+      ctx.beginPath(); ctx.arc(pos.x,pos.y,R,0,Math.PI*2);
+      ctx.fillStyle="rgba(196,142,255,.55)"; ctx.fill();
+      ctx.strokeStyle="rgba(235,211,255,.92)"; ctx.lineWidth=2; ctx.stroke();
+      ctx.fillStyle="rgba(235,211,255,.8)";
+      ctx.font="10px ui-monospace, monospace"; ctx.textAlign="center";
+      ctx.fillText(String(i+1),pos.x,pos.y-17);
+    });
+  }
+
+  function drawPlayer() {
+    ctx.beginPath(); ctx.arc(player.x,player.y,R,0,Math.PI*2);
+    ctx.fillStyle="#70e8ff"; ctx.fill();
+    ctx.strokeStyle="#d8fbff"; ctx.lineWidth=2; ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(player.x,player.y,R+6,0,Math.PI*2);
+    ctx.strokeStyle="rgba(112,232,255,.2)";
+    ctx.stroke();
+  }
+
+  function drawPulses() {
+    for (const p of pulses) {
+      const q=p.age/1.05;
+      const radius=12+q*PULSE_RANGE;
+      ctx.beginPath(); ctx.arc(p.x,p.y,radius,0,Math.PI*2);
+      ctx.strokeStyle = p.isEcho ? `rgba(202,146,255,${.8*(1-q)})` : `rgba(112,232,255,${.9*(1-q)})`;
+      ctx.lineWidth=3; ctx.stroke();
+    }
+  }
+
+  function overlay(title,body) {
+    ctx.fillStyle="rgba(2,5,10,.76)";
+    ctx.fillRect(0,0,W,H);
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle="#f4fbff";
+    ctx.font="bold 38px ui-monospace, monospace";
+    ctx.fillText(title,W/2,H/2-38);
+    ctx.font="16px ui-monospace, monospace";
+    ctx.fillStyle="#c7d9e5";
+    ctx.fillText(body,W/2,H/2+10);
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle="#05070c"; ctx.fillRect(0,0,W,H);
+    drawGrid();
+    drawWalls();
+    drawPads();
+    drawEchoes();
+    drawPlayer();
+    drawPulses();
+
+    ctx.textAlign="left"; ctx.textBaseline="top";
+    ctx.font="bold 18px ui-monospace, monospace";
+    ctx.fillStyle="#e6f8ff";
+    ctx.fillText(`LOOP ${loopNumber}/${MAX_LOOPS}`,18,16);
+    ctx.textAlign="right";
+    ctx.fillText(`${Math.max(0,LOOP-loopTime).toFixed(1)}s`,W-18,16);
+
+    if (!running && !won && !failed) overlay("ECHO RELAY","Press Start or Enter — pulse first, then explore.");
+    if (won) overlay("NETWORK STABLE","All relay pads synchronized. Press Restart or R.");
+    if (failed) overlay("SIGNAL LOST","Five loops elapsed. Press Restart or R and try a new plan.");
+  }
+
+  function updateStatus() {
+    if (won) {
+      statusEl.textContent=`Success on loop ${loopNumber}: all 3 relays occupied.`;
+      startBtn.textContent="Start";
+      return;
+    }
+    if (failed) {
+      statusEl.textContent="Signal lost after five loops. Restart to retry.";
+      startBtn.textContent="Start";
+      return;
+    }
+    const occ=padsOccupied(loopTime).filter(Boolean).length;
+    statusEl.textContent = running
+      ? `Loop ${loopNumber}/${MAX_LOOPS} · ${(LOOP-loopTime).toFixed(1)}s · echoes ${echoes.length} · relays occupied ${occ}/3`
+      : "Press Start or Enter.";
+  }
+
+  function frame(ts) {
+    const dt=Math.min(.04,Math.max(0,(ts-lastTs)/1000 || 0));
+    lastTs=ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("keydown", e => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+    keys.add(e.key);
+    if (e.key===" " && !e.repeat) pulseNow();
+    if (e.key==="Enter" && !running) startGame();
+    if ((e.key==="r" || e.key==="R") && !e.repeat) restart();
+  }, {passive:false});
+  window.addEventListener("keyup", e => keys.delete(e.key));
+  window.addEventListener("blur", () => { keys.clear(); touchDirs.clear(); });
+
+  document.querySelectorAll("[data-dir]").forEach(btn => {
+    const dir=btn.dataset.dir;
+    const down=e => { e.preventDefault(); touchDirs.add(dir); btn.classList.add("active"); if(!running) startGame(); };
+    const up=e => { e.preventDefault(); touchDirs.delete(dir); btn.classList.remove("active"); };
+    btn.addEventListener("pointerdown",down);
+    btn.addEventListener("pointerup",up);
+    btn.addEventListener("pointercancel",up);
+    btn.addEventListener("pointerleave",up);
+  });
+
+  pulseBtn.addEventListener("pointerdown", e => { e.preventDefault(); if(!running) startGame(); pulseNow(); });
+  startBtn.addEventListener("click", startGame);
+  restartBtn.addEventListener("click", restart);
+
+  resetGame();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
